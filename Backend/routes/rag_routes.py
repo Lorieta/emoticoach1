@@ -191,7 +191,8 @@ def rag_sender_context(
         else:
             raise
 
-    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in messages])
+    # Reverse to chronological order (oldest first) for natural reading
+    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in reversed(messages)])
 
     # Get user's previous messages for style
     user_true_name = get_true_name_from_userid(user_id)
@@ -237,38 +238,36 @@ def rag_sender_context(
     # Determine if user should reply or not
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
-    # Get dynamic length instruction based on message content
-    length_instruction = _get_length_instruction(reply_query)
-    
     if should_reply:
-        enhanced_query = (
-            f"You are helping {user_true_name} craft a reply.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"Last message from {last_sender}: {reply_query or 'No message to reply to.'}\n\n"
-            f"Generate a reply AS {user_true_name} responding to {last_sender}'s message."
-            f"{tone_instruction}{user_instruction}{length_instruction}\n\n"
-            f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
-        )
+        # Pass the ACTUAL latest message separately for the RAG to focus on
+        length_instruction = _get_length_instruction(reply_query)
+        try:
+            response = rag.generate_response(
+                query=reply_query,  # Use latest message as the search query
+                user_messages=user_messages,
+                top_k=3,
+                use_reranker=True,
+                latest_message=reply_query,  # The actual message to reply to
+                conversation_context=context,  # Previous conversation for context
+                length_instruction=length_instruction
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
     else:
-        enhanced_query = (
-            f"You are helping {user_true_name}.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"The last message was sent by {user_true_name} themselves: {reply_query}\n\n"
-            "Provide feedback or suggestions about their message, or wait for the other person's response."
-            f"{tone_instruction}{user_instruction}"
-        )
-
-    try:
-        response = rag.generate_response(
-            enhanced_query, 
-            user_messages=user_messages,
-            top_k=3,
-            use_reranker=True
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
+        # User sent the last message - provide feedback
+        length_instruction = _get_length_instruction(reply_query)
+        try:
+            response = rag.generate_response(
+                query=f"Provide brief feedback on this message: {reply_query}",
+                user_messages=user_messages,
+                top_k=3,
+                use_reranker=True,
+                latest_message=reply_query,
+                conversation_context=context,
+                length_instruction=length_instruction
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
 
     emotion_analysis = analyze_emotion(response or "", user_name=user_id)
     return {
@@ -322,7 +321,8 @@ def recent_emotion_context(
             .order_by(Message.DateSent.desc())  # type: ignore[attr-defined]
         )
         context_msgs = session.exec(stmt).all()
-    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in context_msgs])
+    # Reverse to chronological order (oldest first) for natural reading
+    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in reversed(context_msgs)])
     # Analyze emotion for each message
     emotion_context = [
         {
@@ -364,32 +364,19 @@ def recent_emotion_context(
     last_sender = last_message['Sender']
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
-    # Get dynamic length instruction based on message content
-    length_instruction = _get_length_instruction(last_message['MessageContent'] or "")
+    # The actual message content to reply to
+    message_content = last_message['MessageContent'] or ""
     
-    # Use RAG to generate a suggestion based on the context window and last message
-    if should_reply:
-        rag_query = (
-            f"You are helping {user_true_name} craft a reply.\n\n"
-            f"Conversation context (last {window_minutes} minutes):\n{context}\n\n"
-            f"Last message from {last_sender}: {last_message['MessageContent']}\n\n"
-            f"Generate a reply AS {user_true_name} responding to {last_sender}'s message. "
-            f"Use the previous {window_minutes} minutes of conversation as context.\n\n"
-            f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
-            f"{length_instruction}"
-        )
-    else:
-        rag_query = (
-            f"You are helping {user_true_name}.\n\n"
-            f"Conversation context (last {window_minutes} minutes):\n{context}\n\n"
-            f"The last message was sent by {user_true_name} themselves: {last_message['MessageContent']}\n\n"
-            f"Provide feedback about their message or suggest waiting for the other person's response."
-        )
+    # Use RAG to generate a suggestion - pass latest message separately
+    length_instruction = _get_length_instruction(message_content)
     rag_response = rag.generate_response(
-        rag_query, 
+        query=message_content,  # Use latest message as search query
         user_messages=user_messages,
         top_k=3,
-        use_reranker=True
+        use_reranker=True,
+        latest_message=message_content,  # The actual message to reply to
+        conversation_context=context,  # Previous conversation
+        length_instruction=length_instruction
     )
     rag_emotion = analyze_emotion(rag_response or "", user_name=user_true_name)
 
@@ -452,35 +439,16 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
     # Determine if user should reply
     should_reply = not _is_sent_by_user(last_sender, user_name_candidates)
     
-    # Get dynamic length instruction based on message content
     length_instruction = _get_length_instruction(payload.message)
-    
-    if should_reply:
-        rag_query = (
-            f"You are helping {user_display_name} craft a reply.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"Last message from {last_sender}: {payload.message}\n\n"
-            f"Generate a reply AS {user_display_name} responding to {last_sender}'s message."
-            f"{tone_instruction}{length_instruction}\n\n"
-            f"Remember: You are crafting a reply for {user_display_name}, mimicking their communication style."
-        )
-    else:
-        rag_query = (
-            f"You are helping {user_display_name}.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"The last message was sent by {user_display_name} themselves: {payload.message}\n\n"
-            "Provide feedback about their message or suggest improvements."
-            f"{tone_instruction}"
-        )
-
     try:
         rag_response = rag.generate_response(
-            rag_query, 
+            query=payload.message,  # Use the message as search query
             user_messages=user_messages,
             top_k=3,
-            use_reranker=True
+            use_reranker=True,
+            latest_message=payload.message,  # The actual message to reply to
+            conversation_context=None,  # No prior context for manual input
+            length_instruction=length_instruction
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")

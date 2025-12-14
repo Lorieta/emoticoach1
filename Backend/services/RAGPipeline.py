@@ -227,43 +227,117 @@ class SimpleRAG:
         else:
             return initial_results[:top_k]
 
-    def generate_response(self, query, user_messages=None, top_k=3, use_reranker=True):
+    def generate_response(self, query, user_messages=None, top_k=3, use_reranker=True, 
+                          latest_message=None, conversation_context=None, length_instruction=None):
         """
         Generate a response based on the query and context.
-        Length/intent control is handled by the caller via the query prompt.
+        
+        Args:
+            query: The full prompt/query (used for RAG search and fallback)
+            user_messages: List of user's previous messages for style matching
+            top_k: Number of documents to retrieve
+            use_reranker: Whether to use reranking
+            latest_message: The ACTUAL latest message text to reply to (priority)
+            conversation_context: Previous conversation for context
+            length_instruction: Interpretation layer instruction for response length/style
         """
         # Use the enhanced search with reranker
         search_results = self.search(query, top_k=top_k, use_reranker=use_reranker)
         
         # Extract content from search results
-        context = "\n".join([doc["content"] for doc in search_results])
+        rag_context = "\n".join([doc["content"] for doc in search_results])
         
         style_examples = ""
         if user_messages:
-            style_examples = "\nUser style examples:\n" + "\n".join(user_messages)
+            # Limit to last 3 messages for style
+            style_examples = "\nUser style examples:\n" + "\n".join(user_messages[-3:])
 
-        # Get the mapped response tone
-        response_tone = self.get_response_tone(query)
+        # Determine what to reply to - prioritize explicit latest_message
+        message_to_reply = latest_message if latest_message else query
+        
+        # Get the mapped response tone based on the message to reply to
+        response_tone = self.get_response_tone(message_to_reply)
 
-        prompt = (
-            f"{style_examples}\nContext:\n{context}\n\n"
-            f"Question: {query}\n"
-            f"Respond in a {response_tone} tone, based on the user's emotion. "
-            f"Answer based on context and mimic the user's style as shown above.\n"
-            "Rule: Do not mention or invent any personal names; refer to people generically (e.g., 'you', 'they')."
-        )
+        # Build prompt with clear structure
+        prompt_parts = []
+        
+        if style_examples:
+            prompt_parts.append(style_examples)
+        
+        if conversation_context:
+            prompt_parts.append(f"\nConversation history:\n{conversation_context}")
+        
+        if rag_context:
+            prompt_parts.append(f"\nRelevant knowledge:\n{rag_context}")
+        
+        # The LATEST MESSAGE is clearly marked and placed LAST for emphasis
+        prompt_parts.append(f"\n\nTheir message: \"{message_to_reply}\"")
+        
+        prompt = "\n".join(prompt_parts)
+        
+        # Build a more human, emotionally-aware system prompt
+        tone_instructions = {
+            "Calm and reassuring": "Be gentle and soothing. Acknowledge their feelings without being preachy.",
+            "Encouraging and supportive": "Be warm and uplifting. Show you care without overdoing it.",
+            "Friendly and casual": "Be chill and relatable. Keep it light and fun.",
+            "Curious and engaged": "Show genuine interest. Ask follow-ups naturally.",
+            "Warm and affirming": "Celebrate with them! Share their excitement authentically."
+        }
+        
+        tone_guide = tone_instructions.get(response_tone, "Be natural and conversational.")
+        
+        # Build length/style guidance from interpretation layer + set dynamic token limits
+        length_guide = ""
+        max_tokens = 60  # Default: short casual reply
+        
+        if length_instruction:
+            if "detailed" in length_instruction.lower() or "code" in length_instruction.lower():
+                length_guide = "This is a task/request - give a helpful, complete answer."
+                max_tokens = 500  # Allow longer for tasks
+            elif "2-4 sentences" in length_instruction.lower():
+                length_guide = "Answer their question in 2-3 sentences. Be clear but concise."
+                max_tokens = 100  # Medium for questions
+            else:
+                length_guide = "Reply in 1 sentence max. Keep it super short."
+                max_tokens = 50  # Short for casual
+        
         try:
             resp = self.client.chat.completions.create(model=self.model, messages=[
                 {"role": "system", "content": (
-                    "You are a helpful emotional AI coach. Mimic the user's style and use the suggested tone. "
-                    "Never use personal names in your replies."
+                    f"You're texting a close friend. {tone_guide}\n"
+                    f"{length_guide}\n\n"
+                    "RULES:\n"
+                    "- Sound like a real person, not a bot or therapist\n"
+                    "- Use casual language, contractions, maybe even 'haha' or 'lol' if appropriate\n"
+                    "- React genuinely - be empathetic but not fake\n"
+                    "- Match their vibe (Tagalog/English/Taglish)\n"
+                    "- NO names, NO quotes around reply, NO prefixes like 'Reply:'\n"
+                    "- Just output the message text directly"
                 )},
                 {"role": "user", "content": prompt}
-            ], temperature=0.8, max_tokens=300)
+            ], temperature=0.85, max_tokens=max_tokens)
 
             content = (resp.choices[0].message.content or "").strip()
+            
+            # Clean up common formatting issues
+            # Remove quotes if the entire response is wrapped in them
+            if content.startswith('"') and content.endswith('"'):
+                content = content[1:-1].strip()
+            if content.startswith("'") and content.endswith("'"):
+                content = content[1:-1].strip()
+            
+            # Remove common prefixes
+            prefixes_to_remove = [
+                "Reply:", "reply:", "Response:", "response:", 
+                "Here's a reply:", "Here is a reply:",
+                "Suggested reply:", "My reply:",
+            ]
+            for prefix in prefixes_to_remove:
+                if content.startswith(prefix):
+                    content = content[len(prefix):].strip()
+            
             if not content:
-                return "I can help—what exactly do you want to do next?"
+                return "Okay lang."
 
             return content
         except Exception as e:
