@@ -15,6 +15,7 @@ from sqlalchemy.exc import OperationalError, DisconnectionError
 from core.db_connection import engine
 from model.scenario_with_config import ScenarioWithConfig
 from model.scenario_completion import ScenarioCompletion
+from services.RAGPipeline import filter_profanity
 
 def get_db_session_with_retry(max_retries=3):
     """Get database session with retry logic for connection issues."""
@@ -350,7 +351,7 @@ async def chat_with_ai(request: ChatRequest) -> ChatResponse:
                     system_prompt_sections.append(f"{label}: {text_value}")
 
         system_prompt_sections.append(
-            "Core directives: Stay in character as {name}, keep responses concise (2-3 sentences), and support emotional coaching dialogue.".format(
+            "Core directives: Stay in character as {name}, keep responses concise (2-3 sentences), support emotional coaching dialogue, and NEVER use curse words, profanity, or vulgar language.".format(
                 name=character_name
             )
         )
@@ -374,6 +375,9 @@ async def chat_with_ai(request: ChatRequest) -> ChatResponse:
         # Get AI response with concise output
         response = llm.chat(messages, temperature=0.7, max_tokens=150)
         content = re.sub(r"<think>.*?</think>", "", response.message.content, flags=re.DOTALL).strip()
+        
+        # Apply profanity filter to remove any curse words
+        content = filter_profanity(content)
         
         return ChatResponse(
             success=True,
