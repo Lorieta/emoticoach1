@@ -15,6 +15,42 @@ from services.cache import MessageCache
 rag_router = APIRouter(prefix="/rag", tags=["RAG"])
 
 
+def _get_length_instruction(message_text: str) -> str:
+    """
+    Determine response length instruction based on message intent.
+    - TASK (code/steps/fix) → detailed response
+    - QUESTION (has ?) → medium (2-4 sentences)
+    - CASUAL (greetings, short) → brief (1-2 sentences)
+    """
+    t = (message_text or "").strip().lower()
+    
+    # TASK: explicit code/steps/fix/implementation requests
+    task_keywords = (
+        "code", "snippet", "example", "implement", "write a", "generate",
+        "steps", "how to", "fix", "error", "task", "todo",
+        "build", "create", "script", "function", "debug",
+    )
+    if any(k in t for k in task_keywords):
+        return (
+            "\n\nProvide a detailed, complete answer. "
+            "If the user asks for code, include a properly formatted code block. "
+            "If the user asks for steps, list the steps clearly."
+        )
+    
+    # QUESTION: general questions or polite requests
+    if "?" in t or any(k in t for k in ("please", "can you", "could you", "help me", "tell me", "explain")):
+        return "\n\nAnswer clearly in 2-4 sentences."
+    
+    # CASUAL: short greetings, acknowledgments
+    return "\n\nKeep your reply brief (1-2 sentences)."
+
+
+TASK_REPLY_INSTRUCTION = (
+    "\n\nIf the last message contains a question, request, or task, your reply must explicitly address it "
+    "(answer it, confirm/decline, propose next steps, and ask one clarifying question only if needed)."
+)
+
+
 class ManualAnalysisRequest(BaseModel):
     user_id: str
     message: str
@@ -55,6 +91,12 @@ def get_messages_for_conversation(
 def _normalize_name(name: Optional[str]) -> Optional[str]:
     """Normalize names for comparison (case-insensitive, trimmed)."""
     return name.strip().lower() if isinstance(name, str) and name.strip() else None
+
+
+def _is_sent_by_user(sender_name: Optional[str], user_name_candidates: set[str]) -> bool:
+    """Return True if sender_name matches any of the user's known name candidates."""
+    normalized_sender = _normalize_name(sender_name)
+    return bool(normalized_sender) and normalized_sender in user_name_candidates
 
 
 def get_user_name_candidates(user_id: str) -> set[str]:
@@ -149,7 +191,8 @@ def rag_sender_context(
         else:
             raise
 
-    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in messages])
+    # Reverse to chronological order (oldest first) for natural reading
+    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in reversed(messages)])
 
     # Get user's previous messages for style
     user_true_name = get_true_name_from_userid(user_id)
@@ -196,34 +239,35 @@ def rag_sender_context(
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
     if should_reply:
-        enhanced_query = (
-            f"You are helping {user_true_name} craft a reply.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"Last message from {last_sender}: {reply_query or 'No message to reply to.'}\n\n"
-            f"Generate a reply AS {user_true_name} responding to {last_sender}'s message."
-            f"{tone_instruction}{user_instruction}\n\n"
-            f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
-        )
+        # Pass the ACTUAL latest message separately for the RAG to focus on
+        length_instruction = _get_length_instruction(reply_query)
+        try:
+            response = rag.generate_response(
+                query=reply_query,  # Use latest message as the search query
+                user_messages=user_messages,
+                top_k=3,
+                use_reranker=True,
+                latest_message=reply_query,  # The actual message to reply to
+                conversation_context=context,  # Previous conversation for context
+                length_instruction=length_instruction
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
     else:
-        enhanced_query = (
-            f"You are helping {user_true_name}.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"The last message was sent by {user_true_name} themselves: {reply_query}\n\n"
-            "Provide feedback or suggestions about their message, or wait for the other person's response."
-            f"{tone_instruction}{user_instruction}"
-        )
-
-    try:
-        response = rag.generate_response(
-            enhanced_query, 
-            user_messages=user_messages,
-            top_k=3,
-            use_reranker=True
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
+        # User sent the last message - provide feedback
+        length_instruction = _get_length_instruction(reply_query)
+        try:
+            response = rag.generate_response(
+                query=f"Provide brief feedback on this message: {reply_query}",
+                user_messages=user_messages,
+                top_k=3,
+                use_reranker=True,
+                latest_message=reply_query,
+                conversation_context=context,
+                length_instruction=length_instruction
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")
 
     emotion_analysis = analyze_emotion(response or "", user_name=user_id)
     return {
@@ -278,7 +322,8 @@ def recent_emotion_context(
             .order_by(Message.DateSent.desc())  # type: ignore[attr-defined]
         )
         context_msgs = session.exec(stmt).all()
-    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in context_msgs])
+    # Reverse to chronological order (oldest first) for natural reading
+    context = "\n".join([f"{m.Sender}: {m.MessageContent}" for m in reversed(context_msgs)])
     # Analyze emotion for each message
     emotion_context = [
         {
@@ -320,28 +365,19 @@ def recent_emotion_context(
     last_sender = last_message['Sender']
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
-    # Use RAG to generate a suggestion based on the context window and last message
-    if should_reply:
-        rag_query = (
-            f"You are helping {user_true_name} craft a reply.\n\n"
-            f"Conversation context (last {window_minutes} minutes):\n{context}\n\n"
-            f"Last message from {last_sender}: {last_message['MessageContent']}\n\n"
-            f"Generate a reply AS {user_true_name} responding to {last_sender}'s message. "
-            f"Use the previous {window_minutes} minutes of conversation as context.\n\n"
-            f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
-        )
-    else:
-        rag_query = (
-            f"You are helping {user_true_name}.\n\n"
-            f"Conversation context (last {window_minutes} minutes):\n{context}\n\n"
-            f"The last message was sent by {user_true_name} themselves: {last_message['MessageContent']}\n\n"
-            f"Provide feedback about their message or suggest waiting for the other person's response."
-        )
+    # The actual message content to reply to
+    message_content = last_message['MessageContent'] or ""
+    
+    # Use RAG to generate a suggestion - pass latest message separately
+    length_instruction = _get_length_instruction(message_content)
     rag_response = rag.generate_response(
-        rag_query, 
+        query=message_content,  # Use latest message as search query
         user_messages=user_messages,
         top_k=3,
-        use_reranker=True
+        use_reranker=True,
+        latest_message=message_content,  # The actual message to reply to
+        conversation_context=context,  # Previous conversation
+        length_instruction=length_instruction
     )
     rag_emotion = analyze_emotion(rag_response or "", user_name=user_true_name)
 
@@ -377,6 +413,11 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
         payload.user_display_name or get_true_name_from_userid(payload.user_id)
     )
 
+    user_name_candidates = get_user_name_candidates(payload.user_id)
+    normalized_display_name = _normalize_name(user_display_name)
+    if normalized_display_name:
+        user_name_candidates.add(normalized_display_name)
+
     user_messages: List[str] = []
 
     last_sender = payload.sender_name or "Contact"
@@ -397,34 +438,18 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
         )
 
     # Determine if user should reply
-    should_reply = last_sender != user_display_name
+    should_reply = not _is_sent_by_user(last_sender, user_name_candidates)
     
-    if should_reply:
-        rag_query = (
-            f"You are helping {user_display_name} craft a reply.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"Last message from {last_sender}: {payload.message}\n\n"
-            f"Generate a reply AS {user_display_name} responding to {last_sender}'s message."
-            f"{tone_instruction}\n\n"
-            f"Remember: You are crafting a reply for {user_display_name}, mimicking their communication style."
-        )
-    else:
-        rag_query = (
-            f"You are helping {user_display_name}.\n\n"
-            "Conversation context:\n"
-            f"{context if context else 'No prior context available.'}\n\n"
-            f"The last message was sent by {user_display_name} themselves: {payload.message}\n\n"
-            "Provide feedback about their message or suggest improvements."
-            f"{tone_instruction}"
-        )
-
+    length_instruction = _get_length_instruction(payload.message)
     try:
         rag_response = rag.generate_response(
-            rag_query, 
+            query=payload.message,  # Use the message as search query
             user_messages=user_messages,
             top_k=3,
-            use_reranker=True
+            use_reranker=True,
+            latest_message=payload.message,  # The actual message to reply to
+            conversation_context=None,  # No prior context for manual input
+            length_instruction=length_instruction
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Failed to generate response: {exc}")

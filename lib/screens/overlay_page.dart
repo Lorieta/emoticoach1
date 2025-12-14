@@ -671,8 +671,7 @@ class _OverlayScreenState extends State<OverlayScreen>
         if (lastEmotionName != null && lastEmotionName.isNotEmpty) ...[
           const SizedBox(height: 10),
           Text(
-            'Detected emotion: ${_capitalize(lastEmotionName)}'
-            '${lastEmotionScore != null ? ' (${(lastEmotionScore * 100).clamp(0, 100).toStringAsFixed(0)}%)' : ''}',
+            'Detected emotion: ${_capitalize(lastEmotionName)}',
             style: TextStyle(fontSize: 12, color: Colors.grey[700]),
           ),
         ],

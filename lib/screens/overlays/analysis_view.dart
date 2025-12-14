@@ -941,9 +941,6 @@ class _AnalysisViewState extends State<AnalysisView> {
         }
 
         String result = '${detected[0].toUpperCase()}${detected.substring(1)}';
-        if (confidence != null) {
-          result += ' (${(confidence * 100).toStringAsFixed(0)}% confidence)';
-        }
         return result;
       }
     }
@@ -963,7 +960,6 @@ class _AnalysisViewState extends State<AnalysisView> {
 
       if (emotion != null && confidence != null) {
         String result = '${emotion[0].toUpperCase()}${emotion.substring(1)}';
-        result += ' (${(confidence * 100).toInt()}% confidence)';
 
         if (emoji != null) {
           result += ' $emoji';

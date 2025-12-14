@@ -680,13 +680,14 @@ def get_pipeline() -> EmotionEmbedder:
         _emotion_pipeline = EmotionEmbedder()
     return _emotion_pipeline
 
-def interpretation(emotion_data, dominant_emotion: str = None) -> str:
+def interpretation(emotion_data, dominant_emotion: str = None, conversation_history: list[str] = None) -> str:
     """
     Provide human-readable interpretation of emotion analysis results using Groq LLM.
     
     Args:
         emotion_data: Either a dictionary of emotion scores OR full emotion analysis result
         dominant_emotion: The dominant emotion (optional, will be calculated if not provided)
+        conversation_history: List of previous messages for context (optional)
         
     Returns:
         Human-readable interpretation string
@@ -729,7 +730,6 @@ def interpretation(emotion_data, dominant_emotion: str = None) -> str:
         confidence = "uncertain"
 
     sorted_emotions = sorted(emotion_scores.items(), key=lambda x: x[1], reverse=True)
-    secondary_emotions = [emotion for emotion, score in sorted_emotions[1:3] if score > 0.1]
 
     # Get Groq client from pipeline
     from services.emotion_pipeline import get_pipeline
@@ -751,28 +751,32 @@ def interpretation(emotion_data, dominant_emotion: str = None) -> str:
         context_lines.append(f"Analysis method: {analysis_method}")
     if processed_text and processed_text != text:
         context_lines.append(f"Processed text: {processed_text}")
-    if secondary_emotions:
-        secondary_str = ', '.join([f"{e} ({emotion_scores[e]:.2f})" for e in secondary_emotions])
-        context_lines.append(f"Secondary emotions: {secondary_str}")
     
+    if conversation_history:
+        history_str = "\n".join([f"- {msg}" for msg in conversation_history[-3:]]) # Last 3 messages
+        context_lines.append(f"Conversation History:\n{history_str}")
+
     context_str = "\n".join(context_lines) if context_lines else "No additional context"
     
     # Use Groq LLM to generate interpretation
     if groq_client and groq_model and text:
-        prompt = f"""You are an emotion analysis interpreter. Provide a brief, natural explanation of the emotion detected in the text.
+        prompt = f"""You are an expert emotion analyst specializing in detecting subtle tonal shifts.
 
-Text: "{text}"
-Dominant Emotion: {dominant_emotion}
-Confidence Score: {dominant_score:.2f} ({confidence})
+Current Message: "{text}"
+Model Classification: {dominant_emotion} ({confidence})
 {context_str}
 
-Generate a concise interpretation that explains:
-1. Why this emotion was detected in the text
-2. What specific words or phrases contribute to this emotion
-3. The overall emotional tone
+Analyze the message in the context of the history to determine the TRUE emotional tone.
+- Look for contradictions between the text and the situation (Sarcasm).
+- Look for passive-aggressive phrasing.
+- If the text seems positive (e.g. "Great") but the context implies failure, it is likely Sarcasm/Anger.
+- Refer to the Current message aswell as the whole context of the message
+Consider these tones: Sarcastic, Playful, Serious, Frustrated, Enthusiastic, Empathetic, Defensive, Apologetic, Neutral.
 
-Format your response as: "[Your explanation here]"
-Keep it brief and insightful (1 sentence max).
+Provide a concise interpretation (1 sentence) that identifies the specific tone and explains the underlying emotion.
+Do not mention confidence scores or percentages.
+
+Format: "[Your explanation here]"
 """
         
         try:
@@ -784,9 +788,6 @@ Keep it brief and insightful (1 sentence max).
             )
             interpretation_text = response.choices[0].message.content.strip()
             if interpretation_text:
-                # Add secondary emotions if present
-                if secondary_emotions:
-                    interpretation_text += f" Secondary emotions detected: {', '.join(secondary_emotions)}."
                 return interpretation_text
         except Exception as e:
             print(f"Groq interpretation error: {e}")
@@ -797,17 +798,16 @@ Keep it brief and insightful (1 sentence max).
         fallback = f"The text '{text}' shows emotional patterns consistent with {dominant_emotion}."
     else:
         fallback = f"Emotional patterns consistent with {dominant_emotion}."
-    if secondary_emotions:
-        fallback += f" Secondary emotions: {', '.join(secondary_emotions)}."
     return fallback
 
-def analyze_emotion(text: str, user_name: str = None) -> Dict:
+def analyze_emotion(text: str, user_name: str = None, conversation_history: list[str] = None) -> Dict:
     """
     Analyze emotion using the complete pipeline with LLM fallback.
     
     Args:
         text: Text to analyze
         user_name: Optional user name for context
+        conversation_history: Optional list of previous messages
         
     Returns:
         Dictionary with analysis results
@@ -820,8 +820,9 @@ def analyze_emotion(text: str, user_name: str = None) -> Dict:
         
         # Add interpretation
         interpretation_text = interpretation(
-            analysis["emotion_scores"], 
-            analysis["dominant_emotion"]
+            analysis, 
+            analysis["dominant_emotion"],
+            conversation_history
         )
         
         return {
