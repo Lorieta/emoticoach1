@@ -228,6 +228,10 @@ class SimpleRAG:
             return initial_results[:top_k]
 
     def generate_response(self, query, user_messages=None, top_k=3, use_reranker=True):
+        """
+        Generate a response based on the query and context.
+        Length/intent control is handled by the caller via the query prompt.
+        """
         # Use the enhanced search with reranker
         search_results = self.search(query, top_k=top_k, use_reranker=use_reranker)
         
@@ -245,16 +249,23 @@ class SimpleRAG:
             f"{style_examples}\nContext:\n{context}\n\n"
             f"Question: {query}\n"
             f"Respond in a {response_tone} tone, based on the user's emotion. "
-            f"Answer based on context and mimic the user's style as shown above."
-            f"Keep responses brief and concise (1 sentence max).\n"
+            f"Answer based on context and mimic the user's style as shown above.\n"
             "Rule: Do not mention or invent any personal names; refer to people generically (e.g., 'you', 'they')."
         )
         try:
             resp = self.client.chat.completions.create(model=self.model, messages=[
-                {"role": "system", "content": "You are a helpful emotional AI coach. Mimic the user's style and use the suggested tone in your response. Never use personal names in your replies."},
+                {"role": "system", "content": (
+                    "You are a helpful emotional AI coach. Mimic the user's style and use the suggested tone. "
+                    "Never use personal names in your replies."
+                )},
                 {"role": "user", "content": prompt}
-            ], temperature=0.9, max_tokens=100)
-            return resp.choices[0].message.content
+            ], temperature=0.8, max_tokens=300)
+
+            content = (resp.choices[0].message.content or "").strip()
+            if not content:
+                return "I can help—what exactly do you want to do next?"
+
+            return content
         except Exception as e:
             return f"Error: {e}"
 

@@ -15,6 +15,42 @@ from services.cache import MessageCache
 rag_router = APIRouter(prefix="/rag", tags=["RAG"])
 
 
+def _get_length_instruction(message_text: str) -> str:
+    """
+    Determine response length instruction based on message intent.
+    - TASK (code/steps/fix) → detailed response
+    - QUESTION (has ?) → medium (2-4 sentences)
+    - CASUAL (greetings, short) → brief (1-2 sentences)
+    """
+    t = (message_text or "").strip().lower()
+    
+    # TASK: explicit code/steps/fix/implementation requests
+    task_keywords = (
+        "code", "snippet", "example", "implement", "write a", "generate",
+        "steps", "how to", "fix", "error", "task", "todo",
+        "build", "create", "script", "function", "debug",
+    )
+    if any(k in t for k in task_keywords):
+        return (
+            "\n\nProvide a detailed, complete answer. "
+            "If the user asks for code, include a properly formatted code block. "
+            "If the user asks for steps, list the steps clearly."
+        )
+    
+    # QUESTION: general questions or polite requests
+    if "?" in t or any(k in t for k in ("please", "can you", "could you", "help me", "tell me", "explain")):
+        return "\n\nAnswer clearly in 2-4 sentences."
+    
+    # CASUAL: short greetings, acknowledgments
+    return "\n\nKeep your reply brief (1-2 sentences)."
+
+
+TASK_REPLY_INSTRUCTION = (
+    "\n\nIf the last message contains a question, request, or task, your reply must explicitly address it "
+    "(answer it, confirm/decline, propose next steps, and ask one clarifying question only if needed)."
+)
+
+
 class ManualAnalysisRequest(BaseModel):
     user_id: str
     message: str
@@ -55,6 +91,12 @@ def get_messages_for_conversation(
 def _normalize_name(name: Optional[str]) -> Optional[str]:
     """Normalize names for comparison (case-insensitive, trimmed)."""
     return name.strip().lower() if isinstance(name, str) and name.strip() else None
+
+
+def _is_sent_by_user(sender_name: Optional[str], user_name_candidates: set[str]) -> bool:
+    """Return True if sender_name matches any of the user's known name candidates."""
+    normalized_sender = _normalize_name(sender_name)
+    return bool(normalized_sender) and normalized_sender in user_name_candidates
 
 
 def get_user_name_candidates(user_id: str) -> set[str]:
@@ -195,6 +237,9 @@ def rag_sender_context(
     # Determine if user should reply or not
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
+    # Get dynamic length instruction based on message content
+    length_instruction = _get_length_instruction(reply_query)
+    
     if should_reply:
         enhanced_query = (
             f"You are helping {user_true_name} craft a reply.\n\n"
@@ -202,7 +247,7 @@ def rag_sender_context(
             f"{context if context else 'No prior context available.'}\n\n"
             f"Last message from {last_sender}: {reply_query or 'No message to reply to.'}\n\n"
             f"Generate a reply AS {user_true_name} responding to {last_sender}'s message."
-            f"{tone_instruction}{user_instruction}\n\n"
+            f"{tone_instruction}{user_instruction}{length_instruction}\n\n"
             f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
         )
     else:
@@ -319,6 +364,9 @@ def recent_emotion_context(
     last_sender = last_message['Sender']
     should_reply = _normalize_name(last_sender) not in user_name_candidates
     
+    # Get dynamic length instruction based on message content
+    length_instruction = _get_length_instruction(last_message['MessageContent'] or "")
+    
     # Use RAG to generate a suggestion based on the context window and last message
     if should_reply:
         rag_query = (
@@ -328,6 +376,7 @@ def recent_emotion_context(
             f"Generate a reply AS {user_true_name} responding to {last_sender}'s message. "
             f"Use the previous {window_minutes} minutes of conversation as context.\n\n"
             f"Remember: You are crafting a reply for {user_true_name}, mimicking their communication style."
+            f"{length_instruction}"
         )
     else:
         rag_query = (
@@ -376,6 +425,11 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
         payload.user_display_name or get_true_name_from_userid(payload.user_id)
     )
 
+    user_name_candidates = get_user_name_candidates(payload.user_id)
+    normalized_display_name = _normalize_name(user_display_name)
+    if normalized_display_name:
+        user_name_candidates.add(normalized_display_name)
+
     user_messages: List[str] = []
 
     last_sender = payload.sender_name or "Contact"
@@ -396,7 +450,10 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
         )
 
     # Determine if user should reply
-    should_reply = last_sender != user_display_name
+    should_reply = not _is_sent_by_user(last_sender, user_name_candidates)
+    
+    # Get dynamic length instruction based on message content
+    length_instruction = _get_length_instruction(payload.message)
     
     if should_reply:
         rag_query = (
@@ -405,7 +462,7 @@ def manual_emotion_context(payload: ManualAnalysisRequest):
             f"{context if context else 'No prior context available.'}\n\n"
             f"Last message from {last_sender}: {payload.message}\n\n"
             f"Generate a reply AS {user_display_name} responding to {last_sender}'s message."
-            f"{tone_instruction}\n\n"
+            f"{tone_instruction}{length_instruction}\n\n"
             f"Remember: You are crafting a reply for {user_display_name}, mimicking their communication style."
         )
     else:
