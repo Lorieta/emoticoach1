@@ -90,6 +90,38 @@ emoticoach1/
 
 ## Backend Architecture
 
+The backend is a Python **FastAPI** application served by **Uvicorn**. The table below gives a high-level overview of every major component, where it lives, and what it does.
+
+| Component | Location | Responsibility |
+|---|---|---|
+| **App entry point** | `Backend/main.py` | Creates the FastAPI app, registers all routers, configures CORS, starts Uvicorn |
+| **Database connection** | `Backend/core/db_connection.py` | SQLModel/SQLAlchemy engine with PostgreSQL connection pooling |
+| **Supabase storage** | `Backend/core/supabase_config.py` | S3-compatible file storage (boto3) for scenario YAML configs and images |
+| **Messages route** | `Backend/routes/message_routes.py` | Telegram session auth, message fetching, per-user emotion summaries |
+| **RAG route** | `Backend/routes/rag_routes.py` | AI reply suggestion and emotion analysis endpoints (`/rag/*`) |
+| **Scenario route** | `Backend/routes/scenario_route.py` | Role-play scenario CRUD, AI chat, and evaluation (`/scenarios/*`) |
+| **Books route** | `Backend/routes/book_routes.py` | Book library management |
+| **User info route** | `Backend/routes/userinfo_routes.py` | User profile read/write |
+| **Experience route** | `Backend/routes/experience_routes.py` | XP and level progression |
+| **Achievement route** | `Backend/routes/user_achievement_routes.py` | Badge and achievement tracking |
+| **Overlay stats route** | `Backend/routes/overlay_stats_routes.py` | Floating overlay usage statistics |
+| **Cache route** | `Backend/routes/cache_routes.py` | Cache inspection and manual invalidation |
+| **Support route** | `Backend/routes/support_routes.py` | In-app support messages |
+| **Daily route** | `Backend/routes/daily_routes.py` | Daily challenge management |
+| **Stats route** | `Backend/routes/stat_routes.py` | Aggregated user statistics |
+| **Emotion pipeline** | `Backend/services/emotion_pipeline.py` | Translates non-English text via Groq then classifies into 7 emotions using `j-hartmann/emotion-english-roberta-large` |
+| **RAG pipeline** | `Backend/services/RAGPipeline.py` | Dual embedding (semantic + emotion), hybrid similarity search, BGE reranking, Groq LLM response generation |
+| **Local AI classifier** | `Backend/services/AI_inferenece.py` | Offline/batch emotion classification using a locally stored HuggingFace model |
+| **Telegram service** | `Backend/services/messages_services.py` | Telethon MTProto client — session management, message sync, embedding storage |
+| **Scenario service** | `Backend/services/scenario.py` | LlamaIndex + Groq multi-turn chat, YAML persona loading, conversation evaluation |
+| **Cache service** | `Backend/services/cache.py` | Redis-backed caching for messages, user info, emotions, and conversation context |
+| **Experience service** | `Backend/services/experience_service.py` | XP calculation and level-up logic |
+| **ORM models** | `Backend/model/` | SQLModel table definitions (UserInfo, Message, TelegramSession, ScenarioWithConfig, ExperienceInfo, LevelSystem, etc.) |
+| **Utilities** | `Backend/utilities/` | Helper scripts for PDF extraction, image upload, book ingestion |
+| **Dockerfile** | `Backend/Dockerfile` | Python 3.11-slim image; installs PyTorch (CPU) + requirements; runs 6 Uvicorn workers |
+
+---
+
 ### Entry Point
 
 **`Backend/main.py`** bootstraps the FastAPI application:
