@@ -90,7 +90,84 @@ emoticoach1/
 
 ## Backend Architecture
 
-The backend is a Python **FastAPI** application served by **Uvicorn**. The table below gives a high-level overview of every major component, where it lives, and what it does.
+The backend is a Python **FastAPI** application served by **Uvicorn**. The diagram below shows how the major components interact, followed by a reference table with file paths and responsibilities.
+
+```mermaid
+graph TD
+    Client["📱 Flutter Client"]
+
+    subgraph Backend ["Backend (FastAPI / Uvicorn)"]
+        Main["main.py\nApp entry point"]
+
+        subgraph Routes ["Routes"]
+            R_MSG["/messages\nmessage_routes.py"]
+            R_RAG["/rag\nrag_routes.py"]
+            R_SCN["/scenarios\nscenario_route.py"]
+            R_USR["/userinfo\nuserinfo_routes.py"]
+            R_EXP["/experience\nexperience_routes.py"]
+            R_ACH["/achievements\nuser_achievement_routes.py"]
+            R_BKS["/books\nbook_routes.py"]
+            R_DLY["/daily\ndaily_routes.py"]
+            R_STS["/stats\nstat_routes.py"]
+            R_OVR["/overlay-stats\noverlay_stats_routes.py"]
+            R_SUP["/support\nsupport_routes.py"]
+            R_CCH["/cache\ncache_routes.py"]
+        end
+
+        subgraph Services ["Services"]
+            SVC_TG["Telegram Service\nmessages_services.py"]
+            SVC_EMO["Emotion Pipeline\nemotion_pipeline.py"]
+            SVC_RAG["RAG Pipeline\nRAGPipeline.py"]
+            SVC_SCN["Scenario Service\nscenario.py"]
+            SVC_EXP["Experience Service\nexperience_service.py"]
+            SVC_CCH["Cache Service\ncache.py"]
+            SVC_AI["Local AI Classifier\nAI_inferenece.py"]
+        end
+
+        subgraph Models ["ORM Models (Backend/model/)"]
+            ORM["SQLModel Tables\nUserInfo · Message · TelegramSession\nScenarioWithConfig · ExperienceInfo\nLevelSystem · Achievement"]
+        end
+    end
+
+    subgraph External ["External Services"]
+        TG["Telegram\nMTProto API"]
+        HF["HuggingFace\nInference API\nemotion model · embeddings · reranker"]
+        GROQ["Groq LLM\ntranslation · reply generation"]
+        LLAMA["LlamaIndex\nmulti-turn chat"]
+        FB["Firebase Auth"]
+    end
+
+    subgraph Storage ["Storage"]
+        PG[("PostgreSQL")]
+        REDIS[("Redis Cache")]
+        SUPA["Supabase\nS3 Storage"]
+    end
+
+    Client -->|"HTTP / REST"| Main
+    Client -->|"Auth token"| FB
+    Main --> Routes
+
+    R_MSG --> SVC_TG
+    R_RAG --> SVC_EMO
+    R_RAG --> SVC_RAG
+    R_SCN --> SVC_SCN
+    R_EXP --> SVC_EXP
+    R_CCH --> SVC_CCH
+
+    SVC_TG --> TG
+    SVC_EMO --> HF
+    SVC_EMO --> GROQ
+    SVC_RAG --> HF
+    SVC_RAG --> GROQ
+    SVC_SCN --> LLAMA
+    SVC_SCN --> GROQ
+    SVC_SCN --> SUPA
+    SVC_AI --> SVC_AI
+
+    Services --> ORM
+    ORM --> PG
+    SVC_CCH --> REDIS
+```
 
 | Component | Location | Responsibility |
 |---|---|---|
